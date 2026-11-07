@@ -1,0 +1,98 @@
+name: build-preview
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - name: Generate supplied avatar and Windows icons
+        run: |
+          npm run icon
+          npm run tauri -- icon build/icon.png
+          node scripts/set-icon-background.mjs
+      - run: npm run build
+      - name: Native Windows performance collector test
+        shell: pwsh
+        run: ./scripts/verify-windows-metrics.ps1
+      - run: npm run tauri -- build
+      - name: Packaged Windows MCP smoke test
+        shell: pwsh
+        run: ./scripts/verify-windows-mcp.ps1
+      - name: Collect installer and portable executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-win | Out-Null
+          Copy-Item src-tauri/target/release/bundle/nsis/*.exe dist-win/
+          Copy-Item src-tauri/target/release/shellpilot-app.exe dist-win/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShellPilot-windows-preview
+          path: dist-win/*
+          if-no-files-found: error
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - name: Android NDK
+        run: |
+          sdkmanager --install 'ndk;27.0.12077973'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - name: Generate supplied avatar and app icons
+        run: |
+          npm run icon
+          npm run tauri -- icon build/icon.png
+          node scripts/set-icon-background.mjs
+      - run: npm run build
+      - run: npm run tauri -- android init
+      - name: Generate Android launcher icons
+        run: |
+          npm run tauri -- icon build/icon.png
+          node scripts/set-icon-background.mjs
+      - run: node scripts/patch-android.mjs
+      - run: npm run tauri -- android build --apk --target aarch64
+      - name: Sign preview APK
+        run: |
+          keytool -genkeypair -keystore /tmp/preview.keystore -alias preview -keyalg RSA -keysize 2048 -validity 365 -storepass preview-only -keypass preview-only -dname 'CN=ShellPilot Preview'
+          signer=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          mkdir -p dist-apk
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -path '*release*' | head -n 1)
+          test -n "$apk"
+          "$signer" sign --ks /tmp/preview.keystore --ks-pass pass:preview-only --key-pass pass:preview-only --out dist-apk/ShellPilot-arm64-preview.apk "$apk"
+          "$signer" verify --verbose dist-apk/ShellPilot-arm64-preview.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShellPilot-android-preview
+          path: dist-apk/*.apk
+          if-no-files-found: error
