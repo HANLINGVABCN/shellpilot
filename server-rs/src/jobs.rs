@@ -10,6 +10,25 @@ pub fn persist(agent:&crate::AgentState) {
     crate::save_json("agent-jobs.json",&json!({"queue":agent.queue,"active":agent.active_job,"paused":agent.paused}));
 }
 pub fn status(agent:&crate::AgentState)->Value {json!({"type":"chat-job-state","busy":agent.busy,"paused":agent.paused,"pauseReady":agent.pause_ready,"queue":agent.queue,"activeId":agent.active_job.as_ref().map(|job|&job.id),"chatId":agent.chat_id})}
+pub fn repair_history(messages:Vec<Value>)->Vec<Value>{
+    let mut output=Vec::new();let mut index=0;
+    while index<messages.len(){
+        let message=&messages[index];output.push(message.clone());index+=1;
+        if message["role"]!="assistant"{continue;}
+        let Some(calls)=message["tool_calls"].as_array()else{continue;};
+        let mut completed=std::collections::HashSet::new();
+        while index<messages.len() && messages[index]["role"]=="tool" {
+            if let Some(id)=messages[index]["tool_call_id"].as_str(){completed.insert(id.to_string());}
+            output.push(messages[index].clone());index+=1;
+        }
+        for call in calls{
+            if !completed.contains(call["id"].as_str().unwrap_or("")){
+                output.push(json!({"role":"tool","tool_call_id":call["id"],"content":"上次任务中断，此工具结果未保存；不要假定操作未执行，请先检查实际状态。"}));
+            }
+        }
+    }
+    output
+}
 pub async fn broadcast(st:&Arc<AppState>){let agent=st.agent.lock().await;let event=status(&agent);drop(agent);st.broadcast_all(&event);}
 pub async fn checkpoint(st:&Arc<AppState>)->Result<(),String>{
     checkpoint_with(st,0).await
@@ -51,7 +70,7 @@ async fn worker(st:Arc<AppState>){
             if agent.paused || agent.queue.is_empty(){agent.worker_running=false;agent.busy=false;persist(&agent);let event=status(&agent);drop(agent);st.broadcast_all(&event);return;}
             let job=agent.queue.pop_front().unwrap();
             agent.chat_id=Some(job.chat_id.clone());
-            agent.messages=crate::chats::get_chat(crate::CHAT_KEY,&job.chat_id).and_then(|chat|chat["messages"].as_array().cloned()).unwrap_or_default();
+            agent.messages=repair_history(crate::chats::get_chat(crate::CHAT_KEY,&job.chat_id).and_then(|chat|chat["messages"].as_array().cloned()).unwrap_or_default());
             agent.approval_mode=job.mode.clone();agent.reasoning_effort=job.effort.clone();agent.cancel=Some(tokio::sync::watch::channel(false).0);
             agent.active_job=Some(job.clone());agent.busy=true;agent.pause_ready=false;persist(&agent);job
         };
@@ -82,7 +101,17 @@ pub async fn restore(st:&Arc<AppState>){
     }
     agent.queue.retain(|job|crate::chats::get_chat(crate::CHAT_KEY,&job.chat_id).is_some());
     if !agent.queue.is_empty(){agent.paused=true;agent.pause_ready=true;agent.pause_signal.send_replace(true);agent.chat_id=agent.queue.front().map(|job|job.chat_id.clone());
-        agent.messages=agent.chat_id.as_ref().and_then(|id|crate::chats::get_chat(crate::CHAT_KEY,id)).and_then(|chat|chat["messages"].as_array().cloned()).unwrap_or_default();
+        agent.messages=repair_history(agent.chat_id.as_ref().and_then(|id|crate::chats::get_chat(crate::CHAT_KEY,id)).and_then(|chat|chat["messages"].as_array().cloned()).unwrap_or_default());
     }
     persist(&agent);
+}
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn interrupted_tool_history_is_repaired_without_duplicating_complete_results(){
+        let messages=vec![json!({"role":"user","content":"task"}),json!({"role":"assistant","tool_calls":[{"id":"one"},{"id":"two"}]}),json!({"role":"tool","tool_call_id":"one","content":"done"})];
+        let repaired=repair_history(messages);assert_eq!(repaired.len(),4);assert_eq!(repaired[3]["tool_call_id"],"two");
+        assert_eq!(repair_history(repaired.clone()),repaired);
+    }
 }
