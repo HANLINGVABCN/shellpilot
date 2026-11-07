@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
 const browser=await chromium.launch();
+let activePage;
 try{
   for(const width of [390,1040]){
     const page=await browser.newPage({viewport:{width,height:850},locale:'zh-CN'});
+    activePage=page;
     let settings={providers:[{id:'p',name:'Mock'}],models:[{id:'m',providerId:'p',name:'mock'}],defaultModelId:'m',params:{temperature:0.3,maxTokens:0,historyLimit:0,maxSteps:0,contextChars:0},systemPrompt:'测试',autoMemory:true,mcpEnabled:false};
     let memories=[{id:'one',topic:'回答方式',content:'解释时使用简单的话',enabled:true,source:'manual',updatedAt:1762401600000},{id:'two',topic:'部署目录',content:'默认目录 /srv/demo',enabled:false,source:'ai',updatedAt:1762401600000}];
     let jobs={busy:true,paused:false,pauseReady:false,queue:[],activeId:'active',chatId:'chat'};
@@ -42,7 +44,8 @@ try{
     await page.goto('http://127.0.0.1:4173');
     await Promise.all([page.waitForResponse((response)=>response.url().endsWith('/api/settings')&&response.request().method()==='PUT'),page.getByRole('checkbox',{name:'允许 AI 主动记住新内容',exact:true}).uncheck()]);
     assert.equal(settings.autoMemory,false);assert(memories[0].enabled,'Auto off cannot disable existing memory');
-    await Promise.all([page.waitForResponse((response)=>response.url().endsWith('/api/memories/one')),page.getByRole('checkbox',{name:'参与回答 回答方式',exact:true}).uncheck()]);
+    await Promise.all([page.waitForResponse((response)=>response.url().endsWith('/api/memories/one')&&response.request().method()==='PUT'),page.getByRole('checkbox',{name:'参与回答 回答方式',exact:true}).click()]);
+    await page.getByRole('checkbox',{name:'参与回答 回答方式',exact:true}).waitFor({state:'detached'});
     await page.getByRole('combobox',{name:'记忆筛选',exact:true}).selectOption('disabled');
     await page.getByText('解释时使用简单的话',{exact:true}).waitFor();
     await page.getByRole('button',{name:'添加记忆',exact:true}).click();
@@ -76,4 +79,5 @@ try{
     assert.deepEqual(dialogs,[]);assert.deepEqual(errors,[]);await page.close();
   }
   console.log('PASS: memory auto toggle/per-item controls/CRUD/batch, two-line card and body toggle, copy exceptions, pause/queue editing');
-}finally{await browser.close();}
+}catch(error){if(activePage&&!activePage.isClosed()){await activePage.screenshot({path:'layout-screenshots/memory-ui-failure.png'});console.error(await activePage.locator('body').innerText());}throw error;}
+finally{await browser.close();}
