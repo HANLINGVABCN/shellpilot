@@ -165,7 +165,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
   useEffect(() => {
     const restore = () => api('/agent/status').then((status) => {
       applyJobState(status);
-      if (status.busy && status.chatId) {
+      if ((status.busy || status.queue?.length) && status.chatId) {
         setChatId(status.chatId);
         setMsgs(storedToDisplay(status.messages || []));
         if (Array.isArray(status.scope)) setScope(status.scope);

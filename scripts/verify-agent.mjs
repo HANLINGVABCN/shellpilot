@@ -64,7 +64,7 @@ const model = http.createServer((req, res) => {
         assert(!prompt.includes('请使用简短中文回答'),'Disabled memory content must not enter model context');
         choice={delta:{content:'已停用'},finish_reason:'stop'};
       }else if(count===1){
-        choice={delta:{tool_calls:[{index:0,id:'mem-'+task,function:{name:'remember_memory',arguments:JSON.stringify({topic:'回答风格',content:'请使用简短中文回答'})}}]},finish_reason:'tool_calls'};
+        choice={delta:{tool_calls:[{index:0,id:'mem-'+task,function:{name:'remember_memory',arguments:JSON.stringify({topic:'回答风格',content:task==='memory-protected'?'AI 尝试覆盖手动记忆':'请使用简短中文回答'})}}]},finish_reason:'tool_calls'};
       }else{choice={delta:{content:'记忆处理完成'},finish_reason:'stop'};}
       res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(`data: ${JSON.stringify({choices:[choice]})}\n\ndata: [DONE]\n\n`);return;
     }
@@ -122,7 +122,7 @@ const model = http.createServer((req, res) => {
 model.listen(0, '127.0.0.1');
 await new Promise((resolve) => model.once('listening', resolve));
 const executable = path.resolve('server-rs/target/debug/shellpilot-server');
-const backend = spawn(executable, [], { env: { ...process.env, SHELLPILOT_DATA: dir, SHELLPILOT_PORT: '0', SHELLPILOT_OPEN: '0' }, stdio: ['ignore', 'pipe', 'inherit'] });
+let backend = spawn(executable, [], { env: { ...process.env, SHELLPILOT_DATA: dir, SHELLPILOT_PORT: '0', SHELLPILOT_OPEN: '0' }, stdio: ['ignore', 'pipe', 'inherit'] });
 let ws;
 try {
   const base = await new Promise((resolve, reject) => {
@@ -307,12 +307,17 @@ try {
   await runTask('memory-use-off');
   await api('/memories/'+memories[0].id,'PUT',{enabled:false});
   await runTask('memory-disabled');
+  await api('/settings','PUT',{...settingsBeforeMemory,autoMemory:true});
+  await runTask('memory-no-reenable');assert.equal((await api('/memories')).memories[0].enabled,false,'Duplicate memory cannot reactivate a disabled record');
   const manual=await api('/memories','POST',{topic:'站点目录',content:'站点位于 /srv/demo',enabled:true});assert.equal(manual.memory.source,'manual');
   await api('/memories/'+manual.memory.id,'PUT',{topic:'站点目录',content:'站点位于 /opt/demo',expectedUpdatedAt:manual.memory.updatedAt});
   const conflict=await fetch(base+'/api/memories/'+manual.memory.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:'站点目录',content:'old',expectedUpdatedAt:manual.memory.updatedAt})});assert.equal(conflict.status,400,'Stale editor cannot overwrite updated memory');
   await api('/memories/batch','POST',{ids:[memories[0].id,manual.memory.id],enabled:true});
   await api('/settings','PUT',{...settingsBeforeMemory,autoMemory:true});
   await runTask('memory-duplicate-again');assert.equal((await api('/memories')).memories.length,2);
+  const existing=(await api('/memories')).memories.find((memory)=>memory.topic==='回答风格');
+  await api('/memories/'+existing.id,'PUT',{topic:'回答风格',content:'由用户手动维护的回答偏好'});
+  await runTask('memory-protected');assert.equal((await api('/memories')).memories.find((memory)=>memory.id===existing.id).content,'由用户手动维护的回答偏好','AI cannot overwrite user-managed memory');
   const memoryFile=JSON.parse(fs.readFileSync(path.join(dir,'memories.json'),'utf8'));assert.equal(memoryFile.length,2);
   const exported=await fetch(base+'/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'test-backup'})});assert(exported.ok);
   const exportData=Buffer.from(await exported.arrayBuffer()).toString('base64');await api('/import/preview','POST',{password:'test-backup',data:exportData});
@@ -344,6 +349,18 @@ try {
   ws.send(JSON.stringify({type:'chat',text:'queue-after-restart',mode:'auto',effort:'off'}));
   await until(()=>events.some((event)=>event.type==='chat-job-state'&&event.queue?.some((job)=>job.text==='queue-after-restart')));
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'agent-jobs.json'),'utf8')).queue.length,1,'Paused queues must persist');
+  ws.close();
+  const exit=new Promise((resolve)=>backend.once('exit',resolve));backend.kill();await exit;
+  const port=new URL(base).port;
+  backend=spawn(executable,[],{env:{...process.env,SHELLPILOT_DATA:dir,SHELLPILOT_PORT:port,SHELLPILOT_OPEN:'0'},stdio:['ignore','pipe','inherit']});
+  await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('Restart timed out')),15000);backend.stdout.on('data',(data)=>{if(data.toString().includes(base)){clearTimeout(timeout);resolve();}});});
+  const restored=await api('/agent/status');assert.equal(restored.paused,true);assert.equal(restored.queue[0].text,'queue-after-restart');
+  assert(!fs.existsSync(path.join(dir,'queue-after-restart')),'Restored work must not start before explicit continue');
+  assert.equal((await api('/memories')).memories.length,2,'Memories survive backend restart');
+  events.length=0;
+  ws=new WebSocket(base.replace('http:','ws:')+'/ws');ws.onmessage=(event)=>events.push(JSON.parse(event.data));await new Promise((resolve)=>ws.onopen=resolve);
+  ws.send(JSON.stringify({type:'chat-resume'}));await until(()=>events.some((event)=>event.type==='chat-done'));
+  assert.equal(fs.readFileSync(path.join(dir,'queue-after-restart'),'utf8'),'done');
   console.log('PASS: deleting current conversation clears agent state and disk; running tasks protected; batch/clear supported');
   console.log('PASS: auto-memory control independent of enabled memories, deduplication, editor conflicts, encrypted backup, pause/resume, FIFO/edit/cancel queue and no duplicate writes');
   console.log('PASS: SSH trust, parallel diagnostics, file preview/approval/backup/verification, persisted final reply, MCP bridge/read-only, task cancellation');

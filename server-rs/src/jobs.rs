@@ -10,7 +10,7 @@ pub fn persist(agent:&crate::AgentState) {
     crate::save_json("agent-jobs.json",&json!({"queue":agent.queue,"active":agent.active_job,"paused":agent.paused}));
 }
 pub fn status(agent:&crate::AgentState)->Value {json!({"type":"chat-job-state","busy":agent.busy,"paused":agent.paused,"pauseReady":agent.pause_ready,"queue":agent.queue,"activeId":agent.active_job.as_ref().map(|job|&job.id),"chatId":agent.chat_id})}
-pub async fn broadcast(st:&Arc<AppState>){st.broadcast_all(&status(&st.agent.lock().await));}
+pub async fn broadcast(st:&Arc<AppState>){let agent=st.agent.lock().await;let event=status(&agent);drop(agent);st.broadcast_all(&event);}
 pub async fn checkpoint(st:&Arc<AppState>)->Result<(),String>{
     checkpoint_with(st,0).await
 }

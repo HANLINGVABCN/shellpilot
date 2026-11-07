@@ -10,11 +10,6 @@ fn write(memories:&[Value])->Result<(),String> {
     std::fs::write(&temp,serde_json::to_vec_pretty(memories).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
     std::fs::rename(temp,path).map_err(|e|format!("保存记忆失败：{e}"))
 }
-pub fn check_export_rows(value:&Value)->Result<(),String>{
-    let Some(rows)=value.as_array()else{return Err("记忆备份必须是数组".into());};
-    for row in rows{text(row,"topic")?;text(row,"content")?;}
-    Ok(())
-}
 fn normalized(text:&str)->String { text.split_whitespace().collect::<String>().to_lowercase() }
 fn text(body:&Value,key:&str)->Result<String,String> {
     let text=body[key].as_str().unwrap_or("").trim();
@@ -62,7 +57,7 @@ pub fn save(body:&Value,id:Option<&str>,automatic:bool)->Result<Value,String> {
 pub fn change(ids:&[String],enabled:Option<bool>)->Result<usize,String> {
     let _lock=LOCK.lock().unwrap();let mut memories=read();let mut changed=0;
     if let Some(enabled)=enabled {
-        for memory in &mut memories {if ids.iter().any(|id|memory["id"].as_str()==Some(id)) {memory["enabled"]=json!(enabled);memory["updatedAt"]=json!(crate::now_ms());changed+=1;}}
+        for memory in &mut memories {if ids.iter().any(|id|memory["id"].as_str()==Some(id)) {memory["enabled"]=json!(enabled);memory["updatedAt"]=json!(crate::now_ms().max(memory["updatedAt"].as_i64().unwrap_or(0)+1));changed+=1;}}
     }else{let count=memories.len();memories.retain(|memory|!ids.iter().any(|id|memory["id"].as_str()==Some(id)));changed=count-memories.len();}
     write(&memories)?;Ok(changed)
 }

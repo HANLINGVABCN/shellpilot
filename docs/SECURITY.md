@@ -11,6 +11,8 @@ Windows 桌面应用默认使用 `%APPDATA%\im.hanling.shellpilot`；Android 数
 | `hosts.json` | 主机地址、用户名、密码或密钥相关信息 |
 | `settings.json` | 模型服务商、API Key、参数和权限 |
 | `chats.json` | 用户消息、模型回复及工具结果 |
+| `memories.json` | 长期记忆、参与回答开关和来源 |
+| `agent-jobs.json` | 当前及排队任务，重启后以暂停状态恢复 |
 | `audit.log` | 命令与操作记录 |
 | `trusted-host-keys.json` | 已保存服务器指纹 |
 | `observed-host-keys.json` | 待处理的服务器指纹变化 |
