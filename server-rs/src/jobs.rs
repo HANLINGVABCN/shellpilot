@@ -67,7 +67,7 @@ async fn worker(st:Arc<AppState>){
     loop {
         let job={
             let mut agent=st.agent.lock().await;
-            if agent.paused || agent.queue.is_empty(){agent.worker_running=false;agent.busy=false;persist(&agent);let event=status(&agent);drop(agent);st.broadcast_all(&event);return;}
+            if agent.paused || agent.queue.is_empty(){agent.worker_running=false;agent.busy=false;agent.pause_ready=agent.paused;persist(&agent);let event=status(&agent);drop(agent);st.broadcast_all(&event);return;}
             let job=agent.queue.pop_front().unwrap();
             agent.chat_id=Some(job.chat_id.clone());
             agent.messages=repair_history(crate::chats::get_chat(crate::CHAT_KEY,&job.chat_id).and_then(|chat|chat["messages"].as_array().cloned()).unwrap_or_default());

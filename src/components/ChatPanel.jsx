@@ -140,6 +140,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
   const [busy, setBusy] = useState(false);  // AI 正在输出/执行
   const [paused,setPaused]=useState(false),[pauseReady,setPauseReady]=useState(false),[queue,setQueue]=useState([]);
   const [queueEditing,setQueueEditing]=useState(null),[memoryNote,setMemoryNote]=useState('');
+  const [queueError,setQueueError]=useState('');
   const jobStateRef=useRef({busy:false,paused:false,queue:[]});
   const applyJobState=(state)=>{jobStateRef.current=state;setBusy(!!state.busy);setPaused(!!state.paused);setPauseReady(!!state.pauseReady);setQueue(state.queue||[]);};
   const listRef = useRef(null);
@@ -320,6 +321,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
       ws.on('tool-request-expired', (m) => setToolReqs((items) => items.filter((item) => item.reqId !== m.reqId))),
       ws.on('chat-progress', setProgress),
       ws.on('chat-job-state',applyJobState),
+      ws.on('error',(message)=>{if(message.requestType?.startsWith('chat-'))setQueueError(message.message);}),
       ws.on('memory-saved',(message)=>{setMemoryNote(`已记住：${message.memory.topic}`);setTimeout(()=>setMemoryNote(''),5000);}),
       ws.on('chat-usage', (m) => setTokens((total) => total + (m.usage.total_tokens || 0))),
       ws.on('chat-rejected', (m) => setMsgs((items) => [...items, {role:'assistant',parts:[],error:m.error}])),
@@ -592,6 +594,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
         )}
       </div>
 
+      {queueError && <div className="queue-panel"><div className="form-err" role="alert">{queueError}</div><button className="btn btn-sm" onClick={()=>setQueueError('')}>知道了</button></div>}
       {queue.length>0 && <div className="queue-panel"><div className="queue-heading"><span>排队消息（{queue.length}）</span><button className="btn btn-sm" onClick={()=>ws.send({type:'chat-queue-clear'})}>清空队列</button></div>{queue.map((job,index)=><div className="queue-item" key={job.id}>{queueEditing?.id===job.id?<><textarea aria-label="编辑排队消息" value={queueEditing.text} onChange={(event)=>setQueueEditing({...queueEditing,text:event.target.value})}/><div className="queue-actions"><button className="btn btn-sm" onClick={()=>setQueueEditing(null)}>取消编辑消息</button><button className="btn btn-sm primary" disabled={!queueEditing.text.trim()} onClick={()=>{ws.send({type:'chat-queue-edit',jobId:job.id,text:queueEditing.text});setQueueEditing(null);}}>保存排队消息</button></div></>:<><p>{index+1}. {job.text}</p><div className="queue-actions"><button className="btn btn-sm" onClick={()=>setQueueEditing({...job})}>编辑排队消息</button><button className="btn btn-sm danger" onClick={()=>ws.send({type:'chat-queue-remove',jobId:job.id})}>取消排队</button></div></>}</div>)}</div>}
       {toolReq && (
         <div className="approval-bar">

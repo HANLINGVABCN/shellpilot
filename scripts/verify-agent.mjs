@@ -249,6 +249,7 @@ try {
   assert(events.some((event) => event.type === 'chat-done' && event.error.includes('停止')));
   assert(events.some((event) => event.type === 'error' && event.message.includes('停止')));
   assert.equal((await api('/agent/status')).busy, false);
+  assert.equal((await api('/agent/status')).pauseReady,true,'Stopping current task must report an idle paused queue');
   ws.send(JSON.stringify({type:'chat-resume'}));
   events.length = 0;
   ws.send(JSON.stringify({type:'chat',text:'stop-exec',mode:'auto',effort:'off'}));

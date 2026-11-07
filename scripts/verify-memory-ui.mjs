@@ -77,6 +77,9 @@ try{
     await page.screenshot({path:`layout-screenshots/${width}-paused-queue-command.png`});
     await page.getByRole('button',{name:'取消排队',exact:true}).click();await page.locator('.queue-panel').waitFor({state:'detached'});
     await page.getByRole('button',{name:'继续',exact:true}).click();assert.equal(jobs.paused,false);
+    socket.send(JSON.stringify({type:'error',requestType:'chat-queue-edit',message:'排队消息已开始执行，不能再编辑'}));
+    await page.getByRole('alert').filter({hasText:'排队消息已开始执行'}).waitFor();
+    await page.getByRole('button',{name:'知道了',exact:true}).click();
     assert.deepEqual(dialogs,[]);assert.deepEqual(errors,[]);await page.close();
   }
   console.log('PASS: memory auto toggle/per-item controls/CRUD/batch, two-line card and body toggle, copy exceptions, pause/queue editing');
