@@ -58,6 +58,7 @@ try{
     await page.getByText('使用中文并保持简短',{exact:true}).waitFor();
     await page.getByRole('checkbox',{name:'选择记忆 语言',exact:true}).check();await page.getByRole('checkbox',{name:'选择记忆 回答方式',exact:true}).check();
     await page.getByRole('button',{name:'停用所选',exact:true}).click();
+    await page.getByRole('button',{name:'停用所选',exact:true}).waitFor({state:'detached'});
     await page.getByRole('checkbox',{name:'选择记忆 语言',exact:true}).check();await page.getByRole('button',{name:'删除所选记忆',exact:true}).click();await page.getByRole('button',{name:'确认删除记忆',exact:true}).click();
     await page.getByText('使用中文并保持简短',{exact:true}).waitFor({state:'detached'});assert.equal(memories.length,2);
     await page.locator('.memory-settings').screenshot({path:`layout-screenshots/${width}-memory-management.png`});
