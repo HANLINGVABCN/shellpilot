@@ -64,7 +64,7 @@ const model = http.createServer((req, res) => {
         assert(!prompt.includes('请使用简短中文回答'),'Disabled memory content must not enter model context');
         choice={delta:{content:'已停用'},finish_reason:'stop'};
       }else if(count===1){
-        choice={delta:{tool_calls:[{index:0,id:'mem-'+task,function:{name:'remember_memory',arguments:JSON.stringify({topic:'回答风格',content:task==='memory-protected'?'AI 尝试覆盖手动记忆':'请使用简短中文回答'})}}]},finish_reason:'tool_calls'};
+        choice={delta:{tool_calls:[{index:0,id:'mem-'+task,function:{name:'remember_memory',arguments:JSON.stringify({topic:'回答风格',content:task==='memory-protected'?'AI 尝试覆盖手动记忆':task==='memory-update'?'中文回答，尽量简短':'请使用简短中文回答'})}}]},finish_reason:'tool_calls'};
       }else{choice={delta:{content:'记忆处理完成'},finish_reason:'stop'};}
       res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(`data: ${JSON.stringify({choices:[choice]})}\n\ndata: [DONE]\n\n`);return;
     }
@@ -304,7 +304,9 @@ try {
   let memories=(await api('/memories')).memories;assert.equal(memories.length,1);assert.equal(memories[0].source,'ai');
   await runTask('memory-duplicate');assert.equal((await api('/memories')).memories.length,1,'Duplicate memory must not create another record');
   const settingsBeforeMemory=await api('/settings');await api('/settings','PUT',{...settingsBeforeMemory,autoMemory:false});
+  const captureChat=(await api('/agent/status')).chatId;ws.send(JSON.stringify({type:'chat-clear'}));
   await runTask('memory-use-off');
+  assert.notEqual((await api('/agent/status')).chatId,captureChat,'Enabled memory must be used in a new conversation with automatic memory off');
   await api('/memories/'+memories[0].id,'PUT',{enabled:false});
   await runTask('memory-disabled');
   await api('/settings','PUT',{...settingsBeforeMemory,autoMemory:true});
@@ -314,6 +316,9 @@ try {
   const conflict=await fetch(base+'/api/memories/'+manual.memory.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:'站点目录',content:'old',expectedUpdatedAt:manual.memory.updatedAt})});assert.equal(conflict.status,400,'Stale editor cannot overwrite updated memory');
   await api('/memories/batch','POST',{ids:[memories[0].id,manual.memory.id],enabled:true});
   await api('/settings','PUT',{...settingsBeforeMemory,autoMemory:true});
+  await runTask('memory-update');
+  const updatedMemory=(await api('/memories')).memories.find((memory)=>memory.topic==='回答风格');
+  assert.equal(updatedMemory.id,memories[0].id,'Same-topic AI updates must replace the original entry');assert.equal(updatedMemory.content,'中文回答，尽量简短');
   await runTask('memory-duplicate-again');assert.equal((await api('/memories')).memories.length,2);
   const existing=(await api('/memories')).memories.find((memory)=>memory.topic==='回答风格');
   await api('/memories/'+existing.id,'PUT',{topic:'回答风格',content:'由用户手动维护的回答偏好'});
