@@ -44,6 +44,7 @@ await new Promise((resolve) => ssh.once('listening', resolve));
 
 let round = 0;
 let unlimitedRound=0;
+const memoryTasks=new Map(),queueTasks=new Map();
 let hostId;
 const model = http.createServer((req, res) => {
   let body = '';
@@ -51,6 +52,28 @@ const model = http.createServer((req, res) => {
   req.on('end', () => {
     const request = JSON.parse(body);
     const task = request.messages.filter((message) => message.role === 'user').at(-1)?.content;
+    if(task?.startsWith('memory-')){
+      const count=(memoryTasks.get(task)||0)+1;memoryTasks.set(task,count);
+      const prompt=request.messages[0].content;
+      let choice;
+      if(task==='memory-use-off'){
+        assert(prompt.includes('请使用简短中文回答'),'Enabled memory must be present with auto capture off');
+        assert(!request.tools.some((tool)=>tool.function.name==='remember_memory'),'Auto capture off must remove memory writer tool');
+        choice={delta:{content:'已使用现有记忆'},finish_reason:'stop'};
+      }else if(task==='memory-disabled'){
+        assert(!prompt.includes('请使用简短中文回答'),'Disabled memory content must not enter model context');
+        choice={delta:{content:'已停用'},finish_reason:'stop'};
+      }else if(count===1){
+        choice={delta:{tool_calls:[{index:0,id:'mem-'+task,function:{name:'remember_memory',arguments:JSON.stringify({topic:'回答风格',content:'请使用简短中文回答'})}}]},finish_reason:'tool_calls'};
+      }else{choice={delta:{content:'记忆处理完成'},finish_reason:'stop'};}
+      res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(`data: ${JSON.stringify({choices:[choice]})}\n\ndata: [DONE]\n\n`);return;
+    }
+    if(task?.startsWith('queue-')){
+      const count=(queueTasks.get(task)||0)+1;queueTasks.set(task,count);
+      const pathToWrite=path.join(dir,task);
+      const choice=count===1?{delta:{tool_calls:[{index:0,id:'tool-'+task,function:{name:'vps_exec',arguments:JSON.stringify({host:hostId,command:`sleep 0.4; printf done >> ${pathToWrite}`})}}]},finish_reason:'tool_calls'}:{delta:{content:task+' finished'},finish_reason:'stop'};
+      res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(`data: ${JSON.stringify({choices:[choice]})}\n\ndata: [DONE]\n\n`);return;
+    }
     if(task==='unlimited-test') {
       assert(!Object.hasOwn(request,'max_tokens') && !Object.hasOwn(request,'max_completion_tokens'),'Zero output budget must omit model token limits');
       unlimitedRound++;
@@ -226,6 +249,7 @@ try {
   assert(events.some((event) => event.type === 'chat-done' && event.error.includes('停止')));
   assert(events.some((event) => event.type === 'error' && event.message.includes('停止')));
   assert.equal((await api('/agent/status')).busy, false);
+  ws.send(JSON.stringify({type:'chat-resume'}));
   events.length = 0;
   ws.send(JSON.stringify({type:'chat',text:'stop-exec',mode:'auto',effort:'off'}));
   await until(() => commands.some((command) => command.includes('must-stay-absent')));
@@ -233,6 +257,7 @@ try {
   await until(() => events.some((event) => event.type === 'chat-done'));
   await new Promise((resolve) => setTimeout(resolve, 2500));
   assert(!fs.existsSync(path.join(dir,'must-stay-absent')), 'Cancelled SSH command must not finish its write');
+  ws.send(JSON.stringify({type:'chat-resume'}));
   events.length = 0;
   const failuresBefore = commands.filter((command) => command === 'false').length;
   ws.send(JSON.stringify({type:'chat',text:'repeat-test',mode:'auto',effort:'off'}));
@@ -273,7 +298,54 @@ try {
   assert(!JSON.stringify(JSON.parse(fs.readFileSync(path.join(dir,'chats.json'),'utf8'))).includes(activeChat),'Deleted conversation must be removed from disk');
   const allDeleted=await api('/chats/__global__/delete','POST',{all:true});assert.equal(allDeleted.ok,true);
   assert.deepEqual(await api('/chats/__global__'),[]);
+  ws.send(JSON.stringify({type:'chat-resume'}));
+  async function runTask(text){events.length=0;ws.send(JSON.stringify({type:'chat',text,mode:'auto',effort:'off'}));await until(()=>events.some((event)=>event.type==='chat-done'));assert(!events.some((event)=>event.type==='chat-done'&&event.error),JSON.stringify(events.filter((event)=>event.error)));await until(()=>events.some((event)=>event.type==='chat-job-state'&&!event.busy));}
+  await runTask('memory-capture');
+  let memories=(await api('/memories')).memories;assert.equal(memories.length,1);assert.equal(memories[0].source,'ai');
+  await runTask('memory-duplicate');assert.equal((await api('/memories')).memories.length,1,'Duplicate memory must not create another record');
+  const settingsBeforeMemory=await api('/settings');await api('/settings','PUT',{...settingsBeforeMemory,autoMemory:false});
+  await runTask('memory-use-off');
+  await api('/memories/'+memories[0].id,'PUT',{enabled:false});
+  await runTask('memory-disabled');
+  const manual=await api('/memories','POST',{topic:'站点目录',content:'站点位于 /srv/demo',enabled:true});assert.equal(manual.memory.source,'manual');
+  await api('/memories/'+manual.memory.id,'PUT',{topic:'站点目录',content:'站点位于 /opt/demo',expectedUpdatedAt:manual.memory.updatedAt});
+  const conflict=await fetch(base+'/api/memories/'+manual.memory.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:'站点目录',content:'old',expectedUpdatedAt:manual.memory.updatedAt})});assert.equal(conflict.status,400,'Stale editor cannot overwrite updated memory');
+  await api('/memories/batch','POST',{ids:[memories[0].id,manual.memory.id],enabled:true});
+  await api('/settings','PUT',{...settingsBeforeMemory,autoMemory:true});
+  await runTask('memory-duplicate-again');assert.equal((await api('/memories')).memories.length,2);
+  const memoryFile=JSON.parse(fs.readFileSync(path.join(dir,'memories.json'),'utf8'));assert.equal(memoryFile.length,2);
+  const exported=await fetch(base+'/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'test-backup'})});assert(exported.ok);
+  const exportData=Buffer.from(await exported.arrayBuffer()).toString('base64');await api('/import/preview','POST',{password:'test-backup',data:exportData});
+  await api('/memories/batch','POST',{ids:[memories[0].id,manual.memory.id],action:'delete'});assert.equal((await api('/memories')).memories.length,0);
+  await api('/import','POST',{password:'test-backup',data:exportData});assert.equal((await api('/memories')).memories.length,2,'Encrypted backup must restore memories');
+
+  events.length=0;
+  ws.send(JSON.stringify({type:'chat',text:'queue-first',mode:'auto',effort:'off'}));
+  await until(()=>commands.some((command)=>command.includes('queue-first')));
+  ws.send(JSON.stringify({type:'chat-pause'}));
+  ws.send(JSON.stringify({type:'chat',text:'queue-edit',mode:'auto',effort:'off'}));
+  ws.send(JSON.stringify({type:'chat',text:'queue-cancel',mode:'auto',effort:'off'}));
+  await until(()=>events.some((event)=>event.type==='chat-job-state'&&event.queue?.length===2));
+  const queued=(await api('/agent/status')).queue;
+  ws.send(JSON.stringify({type:'chat-queue-edit',jobId:queued[0].id,text:'queue-second'}));
+  ws.send(JSON.stringify({type:'chat-queue-remove',jobId:queued[1].id}));
+  await until(()=>events.some((event)=>event.type==='chat-job-state'&&event.pauseReady));
+  assert(fs.existsSync(path.join(dir,'queue-first')),'Already started command should finish before pause');
+  assert(!fs.existsSync(path.join(dir,'queue-second'))&&!fs.existsSync(path.join(dir,'queue-cancel')));
+  assert.equal(queueTasks.get('queue-first'),1,'Pause must not request the next model round');
+  ws.send(JSON.stringify({type:'chat-resume'}));
+  await until(()=>fs.existsSync(path.join(dir,'queue-second')));
+  await until(()=>events.filter((event)=>event.type==='chat-done').length===2);
+  assert.equal(fs.readFileSync(path.join(dir,'queue-first'),'utf8'),'done','Resume must never replay already completed writes');
+  assert(!queueTasks.has('queue-edit')&&!queueTasks.has('queue-cancel'));
+  const order=events.filter((event)=>event.type==='chat-start').map((event)=>event.text);assert.deepEqual(order,['queue-first','queue-second']);
+  await until(()=>events.some((event)=>event.type==='chat-job-state'&&!event.busy&&!event.queue.length));
+  ws.send(JSON.stringify({type:'chat-pause'}));
+  ws.send(JSON.stringify({type:'chat',text:'queue-after-restart',mode:'auto',effort:'off'}));
+  await until(()=>events.some((event)=>event.type==='chat-job-state'&&event.queue?.some((job)=>job.text==='queue-after-restart')));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'agent-jobs.json'),'utf8')).queue.length,1,'Paused queues must persist');
   console.log('PASS: deleting current conversation clears agent state and disk; running tasks protected; batch/clear supported');
+  console.log('PASS: auto-memory control independent of enabled memories, deduplication, editor conflicts, encrypted backup, pause/resume, FIFO/edit/cancel queue and no duplicate writes');
   console.log('PASS: SSH trust, parallel diagnostics, file preview/approval/backup/verification, persisted final reply, MCP bridge/read-only, task cancellation');
 } finally {
   ws?.close();

@@ -21,12 +21,12 @@ pub fn request_approval(
     command: &str,
     host_name: &str,
 ) -> oneshot::Receiver<bool> {
-    request_approval_details(broadcast, command, host_name, "", None, "ai")
+    request_approval_details(broadcast, command, host_name, "", None, "ai",None)
 }
 
 pub fn request_approval_details(
     broadcast: &impl Fn(&serde_json::Value), command: &str, host_name: &str,
-    host_id: &str, preview: Option<serde_json::Value>, source:&str,
+    host_id: &str, preview: Option<serde_json::Value>, source:&str,st:Option<Arc<crate::AppState>>,
 ) -> oneshot::Receiver<bool> {
     let req_id = crate::rand_id("req");
     let (sx, rx) = oneshot::channel();
@@ -37,11 +37,18 @@ pub fn request_approval_details(
         let pending = PENDING.clone();
         let req_id2 = req_id.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            let mut elapsed=0u64;
+            while elapsed<120000 {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if !pending.lock().unwrap().contains_key(&req_id2){return;}
+                let paused=if let Some(st)=&st{st.agent.lock().await.paused}else{false};
+                if !paused{elapsed+=250;}
+            }
             DETAILS.lock().unwrap().remove(&req_id2);
             if let Some((sx, _)) = pending.lock().unwrap().remove(&req_id2) {
                 let _ = sx.send(false);
             }
+            if let Some(st)=&st{st.broadcast_all(&json!({"type":"tool-request-expired","reqId":req_id2}));}
         });
     }
     broadcast(&event);

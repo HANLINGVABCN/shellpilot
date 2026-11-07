@@ -57,9 +57,10 @@ impl ToolContext {
         }
         audit("asked", "人工确认");
         let allowed = crate::approvals::request_approval_details(
-            &|event| self.st.broadcast_all(event), command, name, hid, preview, &self.source,
+            &|event| self.st.broadcast_all(event), command, name, hid, preview, &self.source,if self.source=="ai"{Some(self.st.clone())}else{None},
         ).await.unwrap_or(false);
         if !allowed { audit("denied", "拒绝或审批超时"); return Err("用户拒绝执行或审批已超时".into()); }
+        if self.source=="ai"{crate::jobs::checkpoint_with(&self.st,1).await?;}
         Ok(json!({"decision":"allow","by":"user"}))
     }
 

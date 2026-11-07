@@ -169,63 +169,20 @@ async fn handle_ws(
             Ok(())
         }
         "chat" => {
-            // 全局 Agent：不再绑定主机；机器范围由 agent-scope 单独维护
-            {
-                let mut agent = st.agent.lock().await;
-                if agent.busy {
-                    drop(agent);
-                    let _ = out_tx.send(json!({"type":"chat-rejected","error":"AI 正在处理上一个任务，请先停止或等待完成"}).to_string());
-                    return Ok(());
-                }
-                agent.busy = true;
-                agent.cancel = Some(tokio::sync::watch::channel(false).0);
-            }
-            // 让所有面板同步当前对话（否则别的页面/刷新后不知道对话已经存在）
-            let cur_chat = { st.agent.lock().await.chat_id.clone() };
-            if let Some(chat_id) = cur_chat {
-                let title = crate::chats::get_chat(crate::CHAT_KEY, &chat_id)
-                    .map(|c| c.get("title").cloned().unwrap_or(json!("对话")))
-                    .unwrap_or(json!("对话"));
-                st.broadcast_all(&json!({ "type": "chat-meta", "chatId": chat_id, "title": title }));
-            }
-            let text = m.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            {
-                let mut agent = st.agent.lock().await;
-                if let Some(mode) = m.get("mode").and_then(|v| v.as_str()) {
-                    if ["ask", "auto", "full", "ai"].contains(&mode) {
-                        agent.approval_mode = mode.to_string();
-                    }
-                }
-                if let Some(effort) = m.get("effort").and_then(|v| v.as_str()) {
-                    if ["off", "minimal", "low", "medium", "high"].contains(&effort) {
-                        agent.reasoning_effort = effort.to_string();
-                    }
-                }
-                if agent.chat_id.is_none() {
-                    let title: String = text.trim().chars().take(24).collect();
-                    let chat = crate::chats::create_chat(
-                        crate::CHAT_KEY,
-                        if title.is_empty() { "新对话" } else { &title },
-                    );
-                    let chat_id = chat.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    agent.chat_id = Some(chat_id.clone());
-                    drop(agent);
-                    st.broadcast_all(&json!({ "type": "chat-meta", "chatId": chat_id, "title": chat.get("title").cloned().unwrap_or(json!("对话")) }));
-                }
-            }
-            {
-                let mut agent = st.agent.lock().await;
-                agent.busy = true;
-            }
-            let st2 = st.clone();
-            tokio::spawn(async move {
-                crate::agent::run_agent(st2.clone(), text).await;
-            });
+            let id=crate::jobs::submit(st,&m).await?;
+            let _=out_tx.send(json!({"type":"chat-accepted","jobId":id}).to_string());
             Ok(())
+        }
+        "chat-pause" => {crate::jobs::pause(st,true).await;Ok(())}
+        "chat-resume" => {crate::jobs::pause(st,false).await;Ok(())}
+        "chat-queue-remove" => {crate::jobs::edit(st,m["jobId"].as_str().unwrap_or(""),None).await}
+        "chat-queue-edit" => {crate::jobs::edit(st,m["jobId"].as_str().unwrap_or(""),Some(m["text"].as_str().unwrap_or(""))).await}
+        "chat-queue-clear" => {
+            let mut agent=st.agent.lock().await;agent.queue.clear();crate::jobs::persist(&agent);drop(agent);crate::jobs::broadcast(st).await;Ok(())
         }
         "chat-clear" => {
             let mut agent = st.agent.lock().await;
-            if agent.busy { return Err("请先停止当前任务，再新建对话".into()); }
+            if agent.busy || !agent.queue.is_empty() { return Err("请先结束任务并处理队列，再新建对话".into()); }
             agent.messages.clear();
             agent.chat_id = None;
             agent.busy = false;
@@ -237,7 +194,7 @@ async fn handle_ws(
             let chat_id = m.get("chatId").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(chat) = crate::chats::get_chat(crate::CHAT_KEY, chat_id) {
                 let mut agent = st.agent.lock().await;
-                if agent.busy { return Err("请先停止当前任务，再切换对话".into()); }
+                if agent.busy || !agent.queue.is_empty() { return Err("请先停止当前任务并处理队列，再切换对话".into()); }
                 agent.chat_id = chat.get("id").and_then(|v| v.as_str()).map(String::from);
                 agent.messages = chat.get("messages").and_then(|mv| mv.as_array()).cloned().unwrap_or_default();
             }
@@ -256,6 +213,7 @@ async fn handle_ws(
         "chat-stop" => {
             let agent=st.agent.lock().await;
             if let Some(cancel)=&agent.cancel { cancel.send_replace(true); }
+            drop(agent);crate::jobs::pause(st,true).await;
             Ok(())
         }
         "tool-approve" => {

@@ -49,7 +49,30 @@ async fn ssh_trust(State(st):State<App>,Json(body):Json<Value>)->Response {
 }
 async fn agent_status(State(st):State<App>)->Response {
     let agent=st.agent.lock().await;
-    Json(json!({"busy":agent.busy,"chatId":agent.chat_id,"messages":agent.messages,"scope":agent.scope,"approvals":crate::approvals::pending_approvals()})).into_response()
+    let mut value=crate::jobs::status(&agent);value["messages"]=json!(agent.messages);value["scope"]=json!(agent.scope);value["approvals"]=json!(crate::approvals::pending_approvals());
+    Json(value).into_response()
+}
+async fn memories_list()->Response{Json(json!({"memories":crate::memories::list(),"autoMemory":crate::get_settings()["autoMemory"]})).into_response()}
+async fn memories_create(State(st):State<App>,Json(body):Json<Value>)->Response{
+    match crate::memories::save(&body,None,false){Ok(value)=>{st.broadcast_all(&json!({"type":"memories-changed"}));Json(value).into_response()},Err(error)=>err400(error)}
+}
+async fn memories_update(State(st):State<App>,Path(id):Path<String>,Json(body):Json<Value>)->Response{
+    let result=if body["content"].is_string(){crate::memories::save(&body,Some(&id),false)}
+        else if let Some(enabled)=body["enabled"].as_bool(){crate::memories::change(&[id],Some(enabled)).map(|count|json!({"changed":count}))}
+        else{return err400("请输入记忆内容或启用状态");};
+    match result{Ok(value)=>{st.broadcast_all(&json!({"type":"memories-changed"}));Json(value).into_response()},Err(error)=>err400(error)}
+}
+async fn memories_delete(State(st):State<App>,Path(id):Path<String>)->Response{
+    match crate::memories::change(&[id],None){Ok(count)=>{st.broadcast_all(&json!({"type":"memories-changed"}));Json(json!({"deleted":count})).into_response()},Err(error)=>err400(error)}
+}
+async fn memories_batch(State(st):State<App>,Json(body):Json<Value>)->Response{
+    let Some(ids)=body["ids"].as_array()else{return err400("请选择记忆");};
+    if ids.iter().any(|id|!id.is_string()){return err400("记忆 ID 格式错误");}
+    let ids=ids.iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>();
+    if body["action"]!="delete" && !body["enabled"].is_boolean(){return err400("请选择启用、停用或删除");}
+    match crate::memories::change(&ids,if body["action"]=="delete"{None}else{body["enabled"].as_bool()}){
+        Ok(count)=>{st.broadcast_all(&json!({"type":"memories-changed"}));Json(json!({"changed":count})).into_response()},Err(error)=>err400(error)
+    }
 }
 async fn mcp_test()->Response {
     use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
@@ -324,7 +347,7 @@ async fn chats_get(State(_st): State<App>, Path((key, chat_id)): Path<(String, S
 async fn delete_chat_selection(st:&App,key:&str,ids:Vec<String>)->Response {
     let mut agent=st.agent.lock().await;
     let current_selected=key==crate::CHAT_KEY && agent.chat_id.as_ref().map(|id|ids.contains(id)).unwrap_or(false);
-    if current_selected && agent.busy {return err(StatusCode::CONFLICT,"当前对话正在执行任务，请先停止任务再删除");}
+    if current_selected && agent.busy || key==crate::CHAT_KEY && agent.queue.iter().any(|job|ids.contains(&job.chat_id)){return err(StatusCode::CONFLICT,"对话仍有执行中或排队任务，请先停止并清理队列再删除");}
     let deleted=crate::chats::delete_chats(key,&ids);
     if current_selected {agent.chat_id=None;agent.messages.clear();}
     drop(agent);
@@ -452,7 +475,7 @@ async fn import(State(st): State<App>, raw: Result<Json<Value>, axum::extract::r
     if password.is_empty() || data.is_empty() {
         return err400("密码和数据不能为空");
     }
-    if st.agent.lock().await.busy {
+    if {let agent=st.agent.lock().await;agent.busy || !agent.queue.is_empty()} {
         return err(StatusCode::CONFLICT, "AI 正在执行任务，请等待任务结束后再导入");
     }
     let parsed = match decode_and_decrypt(&data, &password) {
@@ -468,6 +491,10 @@ async fn import(State(st): State<App>, raw: Result<Json<Value>, axum::extract::r
         Ok(r) => r,
         Err(e) => return err400(e),
     };
+    if let Some(memories)=parsed.get("memories") {
+        if let Err(error)=crate::memories::import_records(memories,b["mode"]=="overwrite"){return err400(error);}
+        st.broadcast_all(&json!({"type":"memories-changed"}));
+    }
     crate::save_json("hosts.json", result.get("hosts").unwrap_or(&json!([])));
     crate::save_json("settings.json", result.get("settings").unwrap_or(&json!({})));
     crate::save_json("chats.json", result.get("chats").unwrap_or(&json!({})));
@@ -1236,6 +1263,9 @@ pub fn router(st: App) -> Router {
         .route("/api/ssh/host-keys", get(ssh_keys))
         .route("/api/ssh/trust", post(ssh_trust))
         .route("/api/agent/status", get(agent_status))
+        .route("/api/memories",get(memories_list).post(memories_create))
+        .route("/api/memories/batch",post(memories_batch))
+        .route("/api/memories/{id}",axum::routing::put(memories_update).delete(memories_delete))
         .route("/api/hosts", get(hosts_list).post(hosts_create))
         .route("/api/hosts/{id}", axum::routing::put(hosts_update).delete(hosts_delete))
         .route("/api/settings", get(settings_get).put(settings_put))

@@ -54,6 +54,7 @@ pub fn default_settings() -> Value {
         "defaultModelId": null,
         "approverModelId": null,
         "titleModelId": null,
+        "autoMemory": true,
         "mcpEnabled": false,
         "mcpReadOnly": true,
         "mcpHostIds": null,

@@ -37,6 +37,7 @@ jobs:
           npx vite preview --host 127.0.0.1 --port 4173 > /tmp/shellpilot-vite.log 2>&1 &
           for attempt in $(seq 1 50); do curl -fsS http://127.0.0.1:4173 >/dev/null && break; sleep 0.2; done
           node scripts/verify-layout.mjs
+          node scripts/verify-memory-ui.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

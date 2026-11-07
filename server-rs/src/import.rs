@@ -65,6 +65,13 @@ pub fn validate_import_data(value: &Value) -> Result<Validated, String> {
     if !is_object(value) {
         return Err("备份内容必须是对象".into());
     }
+    if let Some(memories)=value.get("memories") {
+        let Some(memories)=memories.as_array()else{return Err("记忆备份必须是数组".into());};
+        for memory in memories {
+            if !memory.is_object() || memory["topic"].as_str().map(|text|text.trim().is_empty()||text.chars().count()>2000).unwrap_or(true)
+                || memory["content"].as_str().map(|text|text.trim().is_empty()||text.chars().count()>2000).unwrap_or(true) {return Err("记忆备份格式错误".into());}
+        }
+    }
     if let Some(v) = value.get("version") {
         if v != &json!(1) {
             return Err("不支持的备份版本".into());

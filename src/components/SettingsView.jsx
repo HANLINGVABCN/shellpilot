@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { fileToBase64 } from '../binary.js';
+import MemorySettings from './MemorySettings.jsx';
 
 const rand = (p) => p + '_' + Math.random().toString(36).slice(2, 10);
 
@@ -448,6 +449,7 @@ export default function SettingsView() {
         </select>
       </div>
 
+      <MemorySettings settings={s} onSave={save} />
       {/* ---------- 参数 ---------- */}
       <div className="sec-title">生成参数</div>
       <div className="card">

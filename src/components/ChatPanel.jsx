@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import { ws } from '../ws.js';
 import { api } from '../api.js';
 import { reconcileScope, sameScope } from '../scope.js';
+import ToolCard from './ToolCard.jsx';
 
 function UserMessage({ text }) {
   const [expanded, setExpanded] = useState(false);
@@ -137,6 +138,10 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
   const validScope = reconcileScope(scope || [], hosts) || [];
   const [scopeMenu, setScopeMenu] = useState(false);
   const [busy, setBusy] = useState(false);  // AI 正在输出/执行
+  const [paused,setPaused]=useState(false),[pauseReady,setPauseReady]=useState(false),[queue,setQueue]=useState([]);
+  const [queueEditing,setQueueEditing]=useState(null),[memoryNote,setMemoryNote]=useState('');
+  const jobStateRef=useRef({busy:false,paused:false,queue:[]});
+  const applyJobState=(state)=>{jobStateRef.current=state;setBusy(!!state.busy);setPaused(!!state.paused);setPauseReady(!!state.pauseReady);setQueue(state.queue||[]);};
   const listRef = useRef(null);
   const msgsCountRef = useRef(0);
   msgsCountRef.current = msgs.length;
@@ -159,7 +164,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
   useEffect(() => { loadModels(); loadChats(); }, []);
   useEffect(() => {
     const restore = () => api('/agent/status').then((status) => {
-      setBusy(status.busy);
+      applyJobState(status);
       if (status.busy && status.chatId) {
         setChatId(status.chatId);
         setMsgs(storedToDisplay(status.messages || []));
@@ -208,11 +213,12 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
 
   useEffect(() => {
     const offs = [
-      ws.on('chat-start', () => {
+      ws.on('chat-start', (message) => {
         setBusy(true);
         setTokens(0);
         setMsgs((prev) => {
           const next = [...prev];
+          if(message.text)next.push({role:'user',text:message.text});
           const last = next[next.length - 1];
           if (last && last.role === 'assistant' && last.streaming) return next;
           next.push({ role: 'assistant', streaming: true, parts: [] });
@@ -294,7 +300,6 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
         });
       }),
       ws.on('chat-done', (m) => {
-        setBusy(false);
         setProgress(null);
         setToolReqs((items) => items.filter((item) => item.source !== 'ai'));
         setMsgs((prev) => {
@@ -311,10 +316,11 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
       ws.on('chat-cleared', () => { setBusy(false); setMsgs([]); setChatId(null); setChatTitle('新对话'); }),
       ws.on('tool-request', (m) => {
         setToolReqs((items) => [...items.filter((item) => item.reqId !== m.reqId), m]);
-        setTimeout(() => setToolReqs((items) => items.filter((item) => item.reqId !== m.reqId)), Math.max(0, (m.expiresAt || Date.now() + 120000) - Date.now()));
       }),
       ws.on('tool-request-expired', (m) => setToolReqs((items) => items.filter((item) => item.reqId !== m.reqId))),
       ws.on('chat-progress', setProgress),
+      ws.on('chat-job-state',applyJobState),
+      ws.on('memory-saved',(message)=>{setMemoryNote(`已记住：${message.memory.topic}`);setTimeout(()=>setMemoryNote(''),5000);}),
       ws.on('chat-usage', (m) => setTokens((total) => total + (m.usage.total_tokens || 0))),
       ws.on('chat-rejected', (m) => setMsgs((items) => [...items, {role:'assistant',parts:[],error:m.error}])),
       ws.on('chat-ai-judging', (m) => {
@@ -361,7 +367,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
         setChatTitle(m.title);
         loadChats();
         // 面板还是空的（比如刚刷新）→ 拉取当前对话内容，保证刷新前后一致
-        if (msgsCountRef.current === 0 && m.chatId) {
+        if (msgsCountRef.current === 0 && m.chatId && !jobStateRef.current.busy) {
           api('/chats/__global__/' + m.chatId).then((full) => {
             setMsgs(storedToDisplay(full.messages || []));
           }).catch(() => {});
@@ -425,7 +431,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
   };
 
   const newChat = () => {
-    if (busy) return;
+    if (busy || queue.length) return;
     setChatMenu(false);
     setMsgs([]);
     setChatId(null);
@@ -434,7 +440,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
   };
 
   const openChat = async (c) => {
-    if (busy) return;
+    if (busy || queue.length) return;
     setChatMenu(false);
     try {
       const full = await api(`/chats/__global__/${c.id}`);
@@ -447,11 +453,11 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
 
   const removeChat = async (e, c) => {
     e.stopPropagation();
-    if (busy) return;
+    if (busy || queue.length) return;
     setDeleteRequest({ids:[c.id],title:c.title,all:false});setDeleteError('');
   };
   const deleteChats=async()=>{
-    if(!deleteRequest || deleting || busy)return;
+    if(!deleteRequest || deleting || busy || queue.length)return;
     setDeleting(true);setDeleteError('');
     try {
       const result=await api('/chats/__global__/delete','POST',deleteRequest.all?{all:true}:{ids:deleteRequest.ids});
@@ -464,14 +470,8 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
 
   const send = () => {
     const text = input.trim();
-    if (!text || busy || noModel) return;
+    if (!text || noModel) return;
     setInput('');
-    setBusy(true);
-    setMsgs((prev) => [
-      ...prev,
-      { role: 'user', text },
-      { role: 'assistant', streaming: true, parts: [] }
-    ]);
     ws.send({ type: 'chat', text, mode, effort });
   };
 
@@ -499,21 +499,21 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
           </button>
           {chatMenu && (
             <div className="dropdown-menu chat-menu">
-              <button className="menu-item manage" disabled={busy} onClick={newChat}>＋ 新对话</button>
+              <button className="menu-item manage" disabled={busy || queue.length>0} onClick={newChat}>＋ 新对话</button>
               <div className="chat-history-actions">
-                <button className="btn btn-sm" disabled={busy || deleting || !chats.length} onClick={()=>{setManageChats((value)=>!value);setSelectedChats([]);setDeleteRequest(null);}}>{manageChats?'退出管理':'管理对话'}</button>
-                <button className="btn btn-sm danger" disabled={busy || deleting || !chats.length} onClick={()=>{setDeleteRequest({all:true,ids:chats.map((chat)=>chat.id)});setDeleteError('');}}>清空对话</button>
+                <button className="btn btn-sm" disabled={busy || queue.length>0 || deleting || !chats.length} onClick={()=>{setManageChats((value)=>!value);setSelectedChats([]);setDeleteRequest(null);}}>{manageChats?'退出管理':'管理对话'}</button>
+                <button className="btn btn-sm danger" disabled={busy || queue.length>0 || deleting || !chats.length} onClick={()=>{setDeleteRequest({all:true,ids:chats.map((chat)=>chat.id)});setDeleteError('');}}>清空对话</button>
               </div>
               {manageChats && <div className="chat-history-actions"><button className="btn btn-sm" disabled={deleting} onClick={()=>setSelectedChats(selectedChats.length===chats.length?[]:chats.map((chat)=>chat.id))}>{selectedChats.length===chats.length?'取消全选':'全选'}</button><button className="btn btn-sm danger" disabled={busy || deleting || !selectedChats.length} onClick={()=>{setDeleteRequest({all:false,ids:[...selectedChats]});setDeleteError('');}}>删除所选（{selectedChats.length}）</button></div>}
               {deleteRequest && <div className="chat-delete-confirm" role="group" aria-label="删除对话确认"><p>{deleteRequest.all?'清空全部对话？':deleteRequest.title?`删除「${deleteRequest.title}」？`:`删除选中的 ${deleteRequest.ids.length} 个对话？`}</p><span>删除后无法恢复。</span>{deleteError && <p role="alert">{deleteError}</p>}<div className="chat-history-actions"><button className="btn btn-sm" disabled={deleting} onClick={()=>setDeleteRequest(null)}>取消删除</button><button className="btn btn-sm danger" disabled={busy || deleting} onClick={deleteChats}>{deleting?'正在删除…':'确认删除'}</button></div></div>}
-              {busy && <div className="menu-hint">停止任务后可切换对话</div>}
+              {(busy || queue.length>0) && <div className="menu-hint">结束任务并处理队列后可切换对话</div>}
               {chats.length === 0 && <div className="menu-hint">还没有历史对话</div>}
               {chats.map((c) => (
                 <div key={c.id} className={'chat-item' + (c.id === chatId ? ' on' : '')} onClick={() => manageChats ? toggleChatSelection(c.id) : !deleting && openChat(c)}>
                   {manageChats && <input type="checkbox" aria-label={`选择对话 ${c.title}`} disabled={deleting || busy} checked={selectedChats.includes(c.id)} onClick={(event)=>event.stopPropagation()} onChange={()=>toggleChatSelection(c.id)} />}
                   <span className="ci-title" title={c.title}>{c.title}</span>
                   <span className="ci-time">{fmtTime(c.updatedAt)}</span>
-                  <button className="ci-del" title={`删除对话 ${c.title}`} aria-label={`删除对话 ${c.title}`} disabled={busy || deleting} onClick={(e) => removeChat(e, c)}>删除</button>
+                  <button className="ci-del" title={`删除对话 ${c.title}`} aria-label={`删除对话 ${c.title}`} disabled={busy || queue.length>0 || deleting} onClick={(e) => removeChat(e, c)}>删除</button>
                 </div>
               ))}
             </div>
@@ -544,7 +544,8 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
         </div>
       </div>
 
-      {busy && <div className="task-progress"><span>{progress?.phase === 'tools' ? `执行工具（${progress.tools || 1}）` : '思考与生成'}{progress && (progress.maxSteps ? ` · ${progress.step}/${progress.maxSteps} 轮` : ` · 第 ${progress.step} 轮`)}</span><button className="btn btn-sm danger" onClick={() => ws.send({type:'chat-stop'})}>停止</button></div>}
+      {(busy || paused || queue.length>0) && <div className="task-progress"><span>{paused?(pauseReady?'已暂停':'完成当前操作后暂停'):progress?.phase==='tools'?`执行工具（${progress.tools||1}）`:'思考与生成'}{progress && (progress.maxSteps ? ` · ${progress.step}/${progress.maxSteps} 轮` : ` · 第 ${progress.step} 轮`)}</span><div className="queue-actions"><button className="btn btn-sm" onClick={()=>ws.send({type:paused?'chat-resume':'chat-pause'})}>{paused?'继续':'暂停'}</button>{busy && <button className="btn btn-sm danger" onClick={() => ws.send({type:'chat-stop'})}>停止当前任务</button>}</div></div>}
+      {memoryNote && <div className="memory-note" role="status">{memoryNote}</div>}
       {!busy && tokens > 0 && <div className="task-progress">本次用量 {tokens.toLocaleString()} tokens</div>}
       <div className="chat-list" ref={listRef}>
         {msgs.length === 0 && (
@@ -577,55 +578,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
                     </details>
                   );
                 }
-                return p.type === 'tool' ? (
-                  p.name === 'exec_command' ? (
-                    <div key={j} className={'tool-card run' + (p.status === 'running' ? ' running' : '') + (p.isError ? ' failed' : '')}>
-                      <div className="run-head">
-                        <span className="tool-icon">{p.status === 'running' ? '⏳' : p.isError ? '❌' : '✅'}</span>
-                        <span className="run-label">run</span>
-                        {p.host && <span className="tool-host">{p.host}</span>}
-                        {p.judging && <span className="run-judging">AI 审批中…</span>}
-                      </div>
-                      {p.args?.command && (
-                        (p.args.command.length > 60 || p.args.command.includes('\n')) ? (
-                          <details className="run-cmd-box">
-                            <summary>命令（点击展开）</summary>
-                            <code className="run-cmd">{p.args.command}</code>
-                          </details>
-                        ) : (
-                          <code className="run-cmd">{p.args.command}</code>
-                        )
-                      )}
-                      {p.result && (
-                        <details className="run-out-box">
-                          <summary>
-                            输出（{String(p.result).trim().split('\n').length} 行，点击展开）
-                          </summary>
-                          <pre className="tool-result">{p.result}</pre>
-                        </details>
-                      )}
-                      {p.judge && <div className="run-judge">{p.judge}</div>}
-                    </div>
-                  ) : (
-                    <details key={j} className={'tool-card' + (p.status === 'running' ? ' running' : '') + (p.isError ? ' failed' : '')}>
-                      <summary>
-                        <span className="tool-icon">{p.status === 'running' ? '⏳' : p.isError ? '❌' : '✅'}</span>
-                        {{get_metrics:'读取性能指标',vps_exec:'执行命令',vps_exec_batch:'批量执行查询',vps_metrics:'读取性能指标',vps_metrics_batch:'批量读取指标',vps_diagnose:'系统诊断',vps_logs:'查询服务日志',vps_read_file:'读取文件',vps_write_file:'预览或修改文件',vps_list:'读取机器列表'}[p.name] || p.name}
-                        {p.host && <span className="tool-host">{p.host}</span>}
-                      </summary>
-                      {p.result && (
-                        <details className="run-out-box">
-                          <summary>
-                            输出（{String(p.result).trim().split('\n').length} 行，点击展开）
-                          </summary>
-                          <pre className="tool-result">{p.result}</pre>
-                        </details>
-                      )}
-                    </details>
-                  )
-                ) : (
-                  p.text ? <div key={j} className="md" dangerouslySetInnerHTML={render(p.text)} /> : null
-                );
+                return p.type === 'tool' ? <ToolCard key={p.callId || j} part={p} /> : (p.text ? <div key={j} className="md" dangerouslySetInnerHTML={render(p.text)} /> : null);
               })}
               {m.streaming && (!m.parts || m.parts.length === 0) && (
                 <div className="thinking-indicator">
@@ -639,6 +592,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
         )}
       </div>
 
+      {queue.length>0 && <div className="queue-panel"><div className="queue-heading"><span>排队消息（{queue.length}）</span><button className="btn btn-sm" onClick={()=>ws.send({type:'chat-queue-clear'})}>清空队列</button></div>{queue.map((job,index)=><div className="queue-item" key={job.id}>{queueEditing?.id===job.id?<><textarea aria-label="编辑排队消息" value={queueEditing.text} onChange={(event)=>setQueueEditing({...queueEditing,text:event.target.value})}/><div className="queue-actions"><button className="btn btn-sm" onClick={()=>setQueueEditing(null)}>取消编辑消息</button><button className="btn btn-sm primary" disabled={!queueEditing.text.trim()} onClick={()=>{ws.send({type:'chat-queue-edit',jobId:job.id,text:queueEditing.text});setQueueEditing(null);}}>保存排队消息</button></div></>:<><p>{index+1}. {job.text}</p><div className="queue-actions"><button className="btn btn-sm" onClick={()=>setQueueEditing({...job})}>编辑排队消息</button><button className="btn btn-sm danger" onClick={()=>ws.send({type:'chat-queue-remove',jobId:job.id})}>取消排队</button></div></>}</div>)}</div>}
       {toolReq && (
         <div className="approval-bar">
           <div className="ab-row">
@@ -726,7 +680,7 @@ export default function ChatPanel({ hosts, hostsLoaded, probeMap, width, onOpenS
                 </div>
               )}
             </div>
-            <button className="btn btn-sm primary" onClick={send} disabled={busy || noModel || !input.trim()}>发送</button>
+            <button className="btn btn-sm primary" onClick={send} disabled={noModel || !input.trim()}>{busy || paused || queue.length?'加入队列':'发送'}</button>
           </div>
         </div>
       </div>

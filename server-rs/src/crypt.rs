@@ -74,6 +74,7 @@ pub fn export_all() -> Value {
         "exportedAt": crate::now_ms(),
         "hosts": crate::load_json_or("hosts.json", serde_json::json!([])),
         "settings": crate::load_json_or("settings.json", serde_json::json!({})),
-        "chats": crate::load_json_or("chats.json", serde_json::json!({}))
+        "chats": crate::load_json_or("chats.json", serde_json::json!({})),
+        "memories": crate::memories::list()
     })
 }

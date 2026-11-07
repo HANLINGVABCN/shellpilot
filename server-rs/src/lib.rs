@@ -17,6 +17,8 @@ pub mod routes; pub use routes::*;
 pub mod ws; pub use ws::*;
 pub mod mcp; pub use mcp::*;
 pub mod operations;
+pub mod memories;
+pub mod jobs;
 pub mod tool_runtime;
 
 use serde_json::Value;
@@ -35,6 +37,12 @@ pub struct AgentState {
     pub scope: Vec<String>,
     pub allowed: HashSet<String>,
     pub cancel: Option<tokio::sync::watch::Sender<bool>>,
+    pub paused: bool,
+    pub pause_ready: bool,
+    pub pause_signal: tokio::sync::watch::Sender<bool>,
+    pub queue: std::collections::VecDeque<crate::jobs::Job>,
+    pub active_job: Option<crate::jobs::Job>,
+    pub worker_running: bool,
 }
 
 impl Default for AgentState {
@@ -48,6 +56,8 @@ impl Default for AgentState {
             scope: Vec::new(),
             allowed: HashSet::new(),
             cancel: None,
+            paused:false,pause_ready:false,pause_signal:tokio::sync::watch::channel(false).0,
+            queue:std::collections::VecDeque::new(),active_job:None,worker_running:false,
         }
     }
 }
@@ -72,6 +82,7 @@ impl ExecConn {
 }
 
 pub struct AppState {
+    pub tool_operations: std::sync::atomic::AtomicUsize,
     pub hosts: RwLock<Vec<Value>>,
     pub agent: Mutex<AgentState>,
     /// 全量事件广播（Node: broadcastAll → wss.clients）
@@ -90,6 +101,7 @@ impl AppState {
     pub fn new() -> Arc<Self> {
         let (tx_all, _) = tokio::sync::broadcast::channel(4096);
         Arc::new(Self {
+            tool_operations:std::sync::atomic::AtomicUsize::new(0),
             hosts: RwLock::new(Vec::new()),
             agent: Mutex::new(AgentState::default()),
             tx_all,
@@ -128,6 +140,7 @@ impl AppState {
 
 /// 载入 hosts 并启动探针（bin 与 Tauri 壳共用）
 pub async fn bootstrap(st: &Arc<AppState>) {
+    crate::jobs::restore(st).await;
     let hosts: Vec<Value> = load_json_or("hosts.json", serde_json::json!([]))
         .as_array()
         .cloned()
