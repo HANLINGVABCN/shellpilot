@@ -89,8 +89,10 @@ export default function SettingsView() {
       setS(next);
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
+      return true;
     } catch (e) {
       setErr(e.message);
+      return false;
     }
   };
 

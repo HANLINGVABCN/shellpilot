@@ -40,9 +40,9 @@ try{
       await route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
     });
     await page.goto('http://127.0.0.1:4173');
-    await page.getByRole('checkbox',{name:'允许 AI 主动记住新内容',exact:true}).uncheck();
+    await Promise.all([page.waitForResponse((response)=>response.url().endsWith('/api/settings')&&response.request().method()==='PUT'),page.getByRole('checkbox',{name:'允许 AI 主动记住新内容',exact:true}).uncheck()]);
     assert.equal(settings.autoMemory,false);assert(memories[0].enabled,'Auto off cannot disable existing memory');
-    await page.getByRole('checkbox',{name:'参与回答 回答方式',exact:true}).uncheck();
+    await Promise.all([page.waitForResponse((response)=>response.url().endsWith('/api/memories/one')),page.getByRole('checkbox',{name:'参与回答 回答方式',exact:true}).uncheck()]);
     await page.getByRole('combobox',{name:'记忆筛选',exact:true}).selectOption('disabled');
     await page.getByText('解释时使用简单的话',{exact:true}).waitFor();
     await page.getByRole('button',{name:'添加记忆',exact:true}).click();
